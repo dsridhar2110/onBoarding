@@ -92,6 +92,104 @@ app.get('/api/vehicle/quarterly', async (_req, res) => {
   }
 });
 
+// GET /api/parking/markers
+// One endpoint that covers: default load, search (street/zone), and filters.
+// GET /api/parking/markers  (default load, search, filters)
+app.get('/api/parking/markers', async (req, res) => {
+  const { street, zone, years, months, days, hh, mm } = req.query;
+
+  const toIntList = (s) =>
+    (s ? String(s).split(',').map(x => parseInt(x.trim(), 10)).filter(n => !isNaN(n)) : []);
+  const dayNums = (s) => {
+    if (!s) return [];
+    const map = { sun:1, mon:2, tue:3, wed:4, thu:5, fri:6, sat:7 }; // MySQL: Sun=1..Sat=7
+    return String(s).split(',')
+      .map(x => x.trim())
+      .map(x => (/^\d+$/.test(x) ? parseInt(x,10) : map[x.toLowerCase().slice(0,3)]))
+      .filter(Boolean);
+  };
+  const placeholders = (n) => Array(n).fill('?').join(',');
+
+  // parse first, then decide if filters are active
+  const yrs = toIntList(years);
+  const mos = toIntList(months);
+  const dws = dayNums(days);
+  const haveTime = hh != null && mm != null && String(hh) !== '' && String(mm) !== '';
+  const hasFilters = yrs.length > 0 || mos.length > 0 || dws.length > 0 || haveTime;
+
+  const select = `
+    SELECT
+      b.bay_id, b.zone_number, b.status_desc, b.status_timestamp, b.lat, b.lng,
+      CASE WHEN b.status_desc='Present' THEN 'P' ELSE 'U' END AS status_code,
+      GROUP_CONCAT(DISTINCT s.on_street ORDER BY s.on_street SEPARATOR ', ') AS streets,
+      GROUP_CONCAT(DISTINCT CONCAT(r.restriction_days,' ',
+        DATE_FORMAT(r.time_start,'%H:%i'),'-',DATE_FORMAT(r.time_finish,'%H:%i'),' ', r.restriction_display)
+        SEPARATOR '; ') AS restrictions
+  `;
+  const joinCommon = `
+      LEFT JOIN parking_zone_streets      s ON s.zone_number = b.zone_number
+      LEFT JOIN parking_zone_restrictions r ON r.zone_number = b.zone_number
+  `;
+
+  let sql, params = [];
+
+  if (!hasFilters) {
+    // default (latest snapshot) + optional search
+    sql = `
+      ${select}
+      FROM vw_latest_bay_status b
+      ${street ? 'JOIN parking_zone_streets zs ON zs.zone_number = b.zone_number' : ''}
+      ${joinCommon}
+      WHERE 1=1
+      ${zone   ? ' AND b.zone_number = ?' : ''}
+      ${street ? ' AND LOWER(zs.on_street) LIKE LOWER(CONCAT(\'%\', ?, \'%\'))' : ''}
+      GROUP BY b.bay_id, b.zone_number, b.status_desc, b.status_timestamp, b.lat, b.lng
+    `;
+    if (zone)   params.push(Number(zone));
+    if (street) params.push(String(street));
+  } else {
+    // filtered view: pick max ts per bay within filters
+    const subWhere = [];
+    if (yrs.length) { subWhere.push(`YEAR(status_timestamp) IN (${placeholders(yrs.length)})`); params.push(...yrs); }
+    if (mos.length) { subWhere.push(`MONTH(status_timestamp) IN (${placeholders(mos.length)})`); params.push(...mos); }
+    if (dws.length) { subWhere.push(`DAYOFWEEK(status_timestamp) IN (${placeholders(dws.length)})`); params.push(...dws); }
+    if (haveTime)   { subWhere.push(`TIME(status_timestamp) <= MAKETIME(?, ?, 0)`); params.push(Number(hh)||0, Number(mm)||0); }
+
+    const sub = `
+      SELECT bay_id, MAX(status_timestamp) AS max_ts
+      FROM parking_bay_history
+      ${subWhere.length ? 'WHERE ' + subWhere.join(' AND ') : ''}
+      GROUP BY bay_id
+    `;
+
+    sql = `
+      ${select}
+      FROM parking_bay_history b
+      JOIN (${sub}) m ON m.bay_id = b.bay_id AND m.max_ts = b.status_timestamp
+      ${street ? 'JOIN parking_zone_streets zs ON zs.zone_number = b.zone_number' : ''}
+      ${joinCommon}
+      WHERE 1=1
+      ${zone   ? ' AND b.zone_number = ?' : ''}
+      ${street ? ' AND LOWER(zs.on_street) LIKE LOWER(CONCAT(\'%\', ?, \'%\'))' : ''}
+      GROUP BY b.bay_id, b.zone_number, b.status_desc, b.status_timestamp, b.lat, b.lng
+    `;
+    if (zone)   params.push(Number(zone));
+    if (street) params.push(String(street));
+  }
+
+  try {
+    // increase concat limit a bit so long restrictions lists don’t truncate
+    await pool.query('SET SESSION group_concat_max_len = 8192');
+    const [rows] = await pool.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB_ERROR' });
+  }
+});
+
+
+
 // --- Start server (Render will inject PORT) ---
 const port = Number(process.env.PORT || 3000);
 app.listen(port, () => console.log(`API listening on port ${port}`));
