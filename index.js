@@ -141,6 +141,7 @@ app.get('/api/parking/markers', async (req, res) => {
       ${street ? 'JOIN parking_zone_streets zs ON zs.zone_number = b.zone_number' : ''}
       ${joinCommon}
       WHERE 1=1
+        AND b.zone_number <> 0
       ${zone   ? ' AND b.zone_number = ?' : ''}
       ${street ? ' AND LOWER(zs.on_street) LIKE LOWER(CONCAT(\'%\', ?, \'%\'))' : ''}
       GROUP BY b.bay_id, b.zone_number, b.status_desc, b.status_timestamp, b.lat, b.lng
@@ -169,6 +170,7 @@ app.get('/api/parking/markers', async (req, res) => {
       ${street ? 'JOIN parking_zone_streets zs ON zs.zone_number = b.zone_number' : ''}
       ${joinCommon}
       WHERE 1=1
+        AND b.zone_number <> 0
       ${zone   ? ' AND b.zone_number = ?' : ''}
       ${street ? ' AND LOWER(zs.on_street) LIKE LOWER(CONCAT(\'%\', ?, \'%\'))' : ''}
       GROUP BY b.bay_id, b.zone_number, b.status_desc, b.status_timestamp, b.lat, b.lng
@@ -178,7 +180,6 @@ app.get('/api/parking/markers', async (req, res) => {
   }
 
   try {
-    // increase concat limit a bit so long restrictions lists don’t truncate
     await pool.query('SET SESSION group_concat_max_len = 8192');
     const [rows] = await pool.query(sql, params);
     res.json(rows);
@@ -188,56 +189,42 @@ app.get('/api/parking/markers', async (req, res) => {
   }
 });
 
+
 app.get('/api/parking/meta', async (_req, res) => {
   try {
-    const [years]  = await pool.query('SELECT DISTINCT YEAR(status_timestamp) AS year FROM parking_bay_history ORDER BY year ASC');
-    const [months] = await pool.query('SELECT DISTINCT MONTH(status_timestamp) AS month FROM parking_bay_history ORDER BY month ASC');
-    const [streets] = await pool.query('SELECT DISTINCT on_street FROM parking_zone_streets ORDER BY on_street');
-    const [zones]   = await pool.query('SELECT DISTINCT zone_number FROM parking_zone_restrictions ORDER BY zone_number');
-    res.json({
-      years:  years.map(r => r.year),
-      months: months.map(r => r.month),
-      streets: streets.map(r => r.on_street),
-      zones:   zones.map(r => r.zone_number)
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'DB_ERROR' });
-  }
+    const [years]  = await pool.query('SELECT DISTINCT YEAR(status_timestamp) AS year FROM parking_bay_history ORDER BY year');
+    const [months] = await pool.query('SELECT DISTINCT MONTH(status_timestamp) AS month FROM parking_bay_history ORDER BY month');
+    const [streets]= await pool.query('SELECT DISTINCT on_street FROM parking_zone_streets ORDER BY on_street');
+    const [zones]  = await pool.query('SELECT DISTINCT zone_number FROM parking_bay_history WHERE zone_number<>0 ORDER BY zone_number');
+    res.json({ years: years.map(r=>r.year), months: months.map(r=>r.month), streets: streets.map(r=>r.on_street), zones: zones.map(r=>r.zone_number) });
+  } catch (e) { console.error(e); res.status(500).json({ error:'DB_ERROR' }); }
 });
+
 
 app.get('/api/parking/exists', async (req, res) => {
   const { street, zone } = req.query;
   try {
-    let streetExists = false, zoneExists = false, historyExists = false;
-
+    let streetExists=false, zoneExists=false, historyExists=false;
     if (street) {
-      const [s] = await pool.query('SELECT 1 FROM parking_zone_streets WHERE LOWER(on_street) LIKE LOWER(CONCAT("%", ?, "%")) LIMIT 1', [street]);
-      streetExists = s.length > 0;
+      const [s]=await pool.query('SELECT 1 FROM parking_zone_streets WHERE LOWER(on_street) LIKE LOWER(CONCAT("%",?,"%")) LIMIT 1',[street]);
+      streetExists = s.length>0;
     }
     if (zone) {
-      const [z] = await pool.query('SELECT 1 FROM parking_zone_restrictions WHERE zone_number = ? LIMIT 1', [Number(zone)]);
-      zoneExists = z.length > 0;
+      const [z]=await pool.query('SELECT 1 FROM parking_bay_history WHERE zone_number=? LIMIT 1',[Number(zone)]);
+      zoneExists = z.length>0;
     }
-    // if either exists, check history presence (any bay ever in that zone)
-    if (zoneExists) {
-      const [h] = await pool.query('SELECT 1 FROM parking_bay_history WHERE zone_number = ? LIMIT 1', [Number(zone)]);
-      historyExists = h.length > 0;
-    } else if (streetExists) {
-      const [h] = await pool.query(`
-        SELECT 1
-        FROM parking_bay_history b
-        JOIN parking_zone_streets s ON s.zone_number = b.zone_number
-        WHERE LOWER(s.on_street) LIKE LOWER(CONCAT("%", ?, "%"))
-        LIMIT 1
-      `, [street]);
-      historyExists = h.length > 0;
+    // If a street exists, check whether any history is linked to it
+    if (streetExists) {
+      const [h]=await pool.query(`
+        SELECT 1 FROM parking_bay_history b
+        JOIN parking_zone_streets s ON s.zone_number=b.zone_number
+        WHERE LOWER(s.on_street) LIKE LOWER(CONCAT("%",?,"%")) LIMIT 1`, [street]);
+      historyExists = h.length>0;
+    } else if (zoneExists) {
+      historyExists = true; // zone exists in history by definition
     }
     res.json({ streetExists, zoneExists, historyExists });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'DB_ERROR' });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ error:'DB_ERROR' }); }
 });
 
 
