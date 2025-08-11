@@ -33,16 +33,22 @@ const pool = mysql.createPool({
   ssl: { rejectUnauthorized: false } // simple SSL for RDS
 });
 
-// --- Health check ---
-app.get('/health', async (_req, res) => {
+// --- Health: liveness only (no DB) ---
+app.get('/health', (_req, res) => {
+  res.json({ ok: true });
+});
+
+// --- Optional: readiness for DB ---
+app.get('/db-health', async (_req, res) => {
   try {
     const [rows] = await pool.query('SELECT 1 AS ok');
     res.json({ ok: rows[0].ok === 1 });
   } catch (e) {
-    console.error(e);
+    console.error('[DB-HEALTH]', e);
     res.status(500).json({ ok: false, error: 'DB_ERROR' });
   }
 });
+
 
 // --- Data endpoint (quarterly line + tooltip values in one call) ---
 app.get('/api/vehicle/quarterly', async (_req, res) => {
