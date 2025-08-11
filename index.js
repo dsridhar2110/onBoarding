@@ -188,6 +188,57 @@ app.get('/api/parking/markers', async (req, res) => {
   }
 });
 
+app.get('/api/parking/meta', async (_req, res) => {
+  try {
+    const [years]  = await pool.query('SELECT DISTINCT YEAR(status_timestamp) AS year FROM parking_bay_history ORDER BY year ASC');
+    const [months] = await pool.query('SELECT DISTINCT MONTH(status_timestamp) AS month FROM parking_bay_history ORDER BY month ASC');
+    const [streets] = await pool.query('SELECT DISTINCT on_street FROM parking_zone_streets ORDER BY on_street');
+    const [zones]   = await pool.query('SELECT DISTINCT zone_number FROM parking_zone_restrictions ORDER BY zone_number');
+    res.json({
+      years:  years.map(r => r.year),
+      months: months.map(r => r.month),
+      streets: streets.map(r => r.on_street),
+      zones:   zones.map(r => r.zone_number)
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'DB_ERROR' });
+  }
+});
+
+app.get('/api/parking/exists', async (req, res) => {
+  const { street, zone } = req.query;
+  try {
+    let streetExists = false, zoneExists = false, historyExists = false;
+
+    if (street) {
+      const [s] = await pool.query('SELECT 1 FROM parking_zone_streets WHERE LOWER(on_street) LIKE LOWER(CONCAT("%", ?, "%")) LIMIT 1', [street]);
+      streetExists = s.length > 0;
+    }
+    if (zone) {
+      const [z] = await pool.query('SELECT 1 FROM parking_zone_restrictions WHERE zone_number = ? LIMIT 1', [Number(zone)]);
+      zoneExists = z.length > 0;
+    }
+    // if either exists, check history presence (any bay ever in that zone)
+    if (zoneExists) {
+      const [h] = await pool.query('SELECT 1 FROM parking_bay_history WHERE zone_number = ? LIMIT 1', [Number(zone)]);
+      historyExists = h.length > 0;
+    } else if (streetExists) {
+      const [h] = await pool.query(`
+        SELECT 1
+        FROM parking_bay_history b
+        JOIN parking_zone_streets s ON s.zone_number = b.zone_number
+        WHERE LOWER(s.on_street) LIKE LOWER(CONCAT("%", ?, "%"))
+        LIMIT 1
+      `, [street]);
+      historyExists = h.length > 0;
+    }
+    res.json({ streetExists, zoneExists, historyExists });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'DB_ERROR' });
+  }
+});
 
 
 // --- Start server (Render will inject PORT) ---
